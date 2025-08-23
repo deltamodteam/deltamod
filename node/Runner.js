@@ -3,23 +3,23 @@ const Paths = require('./Paths.js');
 const KeyValue = require('./KeyValue.js');
 const fs = require('fs');
 const mime = require('mime-types');
-const zl = require("zip-lib");
-const { pathToFileURL } = require('url');
+const _7z = require("7zip-min");
 const {Downloader} = require("nodejs-file-downloader");
-const { startGamePatch } = require('./GamePatching.js');
 const { getSystemFile, getSystemFolder, getPacketDatabase, setSystemIndex } = require('./System.js');
 const crypto = require('crypto');
-const {randomString, hashFile} = require('./Utils.js');
+const { hashFile, setWindow, page } = require('./Utils.js');
 const { exec } = require('child_process');
 const Modstore = require('./Modstore.js');
+const Updates = require('./Updates.js');
 const GamePatching = require('./GamePatching.js');
-const { error } = require('console');
 const { default: axios } = require('axios');
 const System = require('./System.js');
-const { screen } = require('electron');
 const path = require('path');
 
+const { getConfig, config } = require('7zip-min');
+const { path7za } = require('7zip-bin');
 const console = require('./Console.js');
+const { handleProtocolLaunch } = require('./Protocol.js');
 
 let itch;
 let canLoadItch = false;
@@ -33,6 +33,15 @@ catch (e) {
 
 let win; // Main window
 let sharedVariables = {}; // shared vars with renderer
+let ignoreUpdate = false;
+
+if (process.argv.includes('--developer')) {
+    ignoreUpdate = true;
+}
+
+function loadUrl(url) {
+    win.loadURL(url);
+}
 
 function errorWin(err) {
     const errorStack = err.stack || 'No stack trace available';
@@ -42,14 +51,14 @@ function errorWin(err) {
 
 process.on('uncaughtException', (err) => {
     if (win) {
-        setSharedVar('error', err.toString());
+        setSharedVar('error', err.toString() + "\n" + (err.stack || 'No stack trace available'));
         win.loadURL('deltapack://web/errorWrt/index.html');
     }
 });
 
 process.on('unhandledRejection', (reason, promise) => {
     if (win) {
-        setSharedVar('error', reason.toString());
+        setSharedVar('error', reason.toString() + "\n" + (reason.stack || 'No stack trace available'));
         win.loadURL('deltapack://web/errorWrt/index.html');
     }
 });
@@ -80,6 +89,14 @@ protocol.registerSchemesAsPrivileged([
       secure: true,
       supportFetchAPI: true
     }
+  },
+  {
+    scheme: "deltamod",
+    privileges: {
+        standard: false,
+        secure: true,
+        supportFetchAPI: true
+    }
   }
 ])
 
@@ -98,25 +115,6 @@ function findFirstByName(root, name) {
         }
     }
     return null;
-}
-
-// Zork's Patch: pick the directory that looks like the real mod root
-function findModRoot(root) {
-    const stack = [root];
-    let fallback = null;
-    while (stack.length) {
-        const dir = stack.pop();
-        const hasXml  = fs.existsSync(path.join(dir, 'modding.xml'));
-        const hasId   = fs.existsSync(path.join(dir, '__deltaID.json'));
-        const hasInfo = fs.existsSync(path.join(dir, '_deltamodInfo.json'));
-        if (hasXml && hasId) return dir;
-        if (!fallback && (hasXml || hasId || hasInfo)) fallback = dir;
-
-        let ents;
-        try { ents = fs.readdirSync(dir, { withFileTypes: true }); } catch { continue; }
-        for (const e of ents) if (e.isDirectory()) stack.push(path.join(dir, e.name));
-    }
-    return fallback || root;
 }
 
 function isSubpath(parent, child) {
@@ -197,7 +195,12 @@ function createWindow() {
         KeyValue.writeUniqueFlag('setup', 'true');
         KeyValue.writeUniqueFlag('audio', 'true');
     }
-    app.setAsDefaultProtocolClient('deltamod' + (process.env.DELTAMOD_ENV === 'dev' ? '-dev' : ''));
+
+    
+    //app.setAsDefaultProtocolClient('deltamod' + (process.env.DELTAMOD_ENV === 'dev' ? '-dev' : ''));
+
+    // 7-zip fix for electron
+    config({ ...getConfig(), binaryPath: path7za.replaceAll("app.asar", "app.asar.unpacked") });
 
     // lets check if we need to change part
     var threrror = "";
@@ -237,6 +240,27 @@ function createWindow() {
         });
     });
 
+    ses.protocol.handle('packet', async (request) => {
+        const url = new URL(request.url);
+        // security
+        var combined = url.hostname+url.pathname;
+        if (combined.includes('..') || combined.includes('.js')) {
+            setSharedVar('error', 'Unsecure request made to packet protocol.');
+            win.loadURL('deltapack://web/errorWrt/index.html');
+            return new Response("bad");
+        }
+        const filePath = path.resolve(System.getPacketDatabase(), url.hostname + url.pathname);
+
+        const data = await fs.promises.readFile(filePath);
+        return new Response(data, {
+            headers: {
+                'Content-Type': mime.lookup(filePath.split('.')[filePath.split('.').length - 1]) || 'application/octet-stream',
+                'Content-Length': data.length,
+                'Cache-Control': 'no-cache'
+            }
+        });
+    });
+
     let unmetConditions = require('./RunConditions.js').checkConditions();
 
     if (unmetConditions.length > 0) {
@@ -265,7 +289,7 @@ function createWindow() {
         width: 800,
         height: 800,
         titleBarStyle: 'hidden',
-        resizable: false,
+        resizable: true,
         maximizable: false,
         fullscreenable: false,
         titleBarOverlay: {
@@ -279,9 +303,10 @@ function createWindow() {
             preload: Paths.file('web', 'preload.js'),
         }
     });
+
     win.loadURL('deltapack://web/index.html');
 
-    devToolsEnabled = (process.env.DELTAMOD_ENV === 'dev' ? true : false);
+    devToolsEnabled = (process.argv.includes('--developer') || process.env.DELTAMOD_ENV === 'dev' ? true : false);
 
     win.webContents.on('devtools-opened', () => {
         if (!devToolsEnabled) {
@@ -325,6 +350,27 @@ function createWindow() {
         console.rendererLog(args[1], args[2], args[0]);
     });
 
+    ipcMain.handle('chooseTheme', async () => {
+        var available = fs.readdirSync(path.join(__dirname, '..', 'web', 'themes')).filter(f => f.endsWith('.theme.json'));
+        var themeObjects = available.map(f => {
+            return JSON.parse(fs.readFileSync(path.join(__dirname, '..', 'web', 'themes', f), 'utf8'));
+        });
+
+        var choice = dialog.showMessageBoxSync(win, {
+            type: 'question',
+            title: 'Select a theme',
+            message: 'Select a theme from the list below:',
+            buttons: [...themeObjects.map(t => t.name), 'Cancel'],
+            cancelId: themeObjects.length
+        });
+        if (choice === themeObjects.length) return; // Cancel
+        var theme = themeObjects[choice];
+        var themeHost = System.getSystemFile('_theme', true);
+        fs.writeFileSync(themeHost, theme.id);
+        app.relaunch();
+        app.exit();
+        process.exit(0);
+    });
     /*
      * getTheme
      * returns theme name as specified in the themes folder.
@@ -351,49 +397,41 @@ function createWindow() {
     ipcMain.handle('importMod', async () => {
         const { canceled, filePaths } = await dialog.showOpenDialog(win, {
             properties: ['openFile'],
-            filters: [{ name: 'Deltamod compatible archive', extensions: ['zip'] }]
+            filters: [{ name: 'Deltamod compatible archive', extensions: ['zip', '7z', 'tar.gz', 'lzma'] }]
         });
         if (canceled || !filePaths || !filePaths[0]) return;
 
         const filePath = filePaths[0];
+        Modstore.importMod(filePath);
+    });
 
-        // create unique mod folder
-        const modPath = path.join(app.getPath('userData'), 'pkg.db', randomString(32));
-        fs.mkdirSync(modPath, { recursive: true });
+    /*
+     * removeMod
+     * Removes the folder containing the mod and reloads the list.
+     * args[0] is the ID of the mod.
+     */
+    ipcMain.handle('removeMod', async (event, args) => {
+        await Modstore.removeModSafe(args[0]);
+    });
 
-        try {
-            await zl.extract(filePath, modPath);
+    /*
+     * toggleModState
+     * Changes the mod availability status for the current system profile.
+     * args[0] is the ID of the mod.
+     * args[1] is the new state of the mod.
+     */
+    ipcMain.handle('toggleModState', async (event, args) => {
+        if (args[1]) KeyValue.setKVS("enabledMods", [...KeyValue.readKVS("enabledMods", []), args[0]]);
+        else KeyValue.setKVS("enabledMods", KeyValue.readKVS("enabledMods", []).filter(x => x !== args[0]));
+    });
 
-            // fs.unlinkSync (filePath); // delete the zip file after extraction, I (Zork) commented this out temporarily to keep the zip file for debugging.
-
-            // Normalize: pull contents out of wrapper folder so mod is flat
-            const realRoot = findModRoot(modPath);
-            if (realRoot && path.resolve(realRoot) !== path.resolve(modPath)) {
-                flattenInto(modPath, realRoot);
-            }
-
-            // Check manifest anywhere in the tree (now usually at root after flatten)
-            const manifestPath = findFirstByName(modPath, '_deltamodInfo.json') || path.join(modPath, '_deltamodInfo.json');
-            if (!fs.existsSync(manifestPath)) {
-                fs.rmdirSync(modPath, { recursive: true, force: true });
-                throw new Error('Mod manifest not found. Please ensure the mod is properly packaged.');
-            }
-
-            await dialog.showMessageBox(win, {
-                type: 'info',
-                title: 'Import Successful',
-                message: 'Mod imported successfully.',
-                buttons: ['OK']
-            });
-
-            // Simple way to refresh the list
-            app.relaunch();
-            app.exit();
-            process.exit();
-        } catch (err) {
-            console.error('Error importing mod:', err);
-            dialog.showErrorBox('Import failed', String(err));
-        }
+    /*
+     * getModState
+     * Gets the mod availability status for the current system profile.
+     * args[0] is the ID of the mod.
+     */
+    ipcMain.handle('getModState', async (event, args) => {
+        return KeyValue.readKVS("enabledMods", []).includes(args[0]);
     });
 
     /*
@@ -405,7 +443,7 @@ function createWindow() {
         var folder = args[0];
         switch (folder) {
             case 'mods':
-                shell.openExternal(path.join(app.getPath('userData'), 'pkg.db'));
+                shell.openExternal(getPacketDatabase());
                 break;
             case 'delta':
                 shell.openExternal(getSystemFolder('deltaruneInstall', false));
@@ -414,10 +452,28 @@ function createWindow() {
     });
 
     /*
-        * downloadDelta
-        * Downloads the latest version of the Deltarune demo.
-        * The host is itch.io, and Deltamod uses its API to download the game.
+     * getModImage
+     * Returns the URL of a mod, using the file protocol.
+     * TODO: code a custom protocol for this.
     */
+    ipcMain.handle('getModImage', async (event, args) => {
+        return Modstore.getModImage(args[0]);
+    });
+
+    /*
+     * openModFolder
+     * Opens the specified mod's data folder.
+     * args[0] is the ID of the mod to open the folder of.
+     */
+    ipcMain.handle('openModFolder', async (event, args) => {
+        shell.openExternal(path.join(getPacketDatabase(), args[0]));
+    });
+
+    /*
+     * downloadDelta
+     * Downloads the latest version of the Deltarune demo.
+     * The host is itch.io, and Deltamod uses its API to download the game.
+     */
     ipcMain.handle('downloadDelta', async (event, args) => {
         if (!canLoadItch) {
             dialog.showErrorBox('itch.io download not available', 'Deltamod cannot download the Deltarune demo because the needed authentication file is not available.');
@@ -477,10 +533,10 @@ function createWindow() {
                 fs.mkdirSync(extractPath, { recursive: true });
             }
 
-            await zl.extract(zipPath, extractPath);
+            await _7z.unpack(zipPath, extractPath);
 
             // normalize: move contents from the true mod root to `dest` if wrapped
-            const realRoot = findModRoot(extractPath);
+            const realRoot = GamePatching.findModRoot(extractPath);
             if (realRoot && realRoot !== extractPath && realRoot.startsWith(extractPath)) {
                 const items = fs.readdirSync(realRoot);
                 for (const name of items) {
@@ -533,7 +589,7 @@ function createWindow() {
      * args[0] is the content of the file.
      * args[1] is the name of the file.
      * (Patched to actually write to Documents)
-    */
+     */
     ipcMain.handle('writeToDocuments', async (event, args) => {
         try {
             const desktopPath = app.getPath('documents');
@@ -584,6 +640,43 @@ function createWindow() {
         return;
     }
 
+    ipcMain.handle('start-update', async (event, args) => {
+        console.log(args[0].version);
+        BrowserWindow.fromWebContents(event.sender).webContents.send('page', 'downloadingUpdate');
+
+        const downloader = new Downloader({
+            url: args[0].newVersionLink,
+            fileName: "_deltamod_update_" + args[0].version + ".exe",
+            directory: app.getPath('downloads'),
+            onProgress: function (percentage, chunk, remainingSize) {
+                win.webContents.send('du-progress', {
+                    percentage: percentage
+                });
+            },
+        });
+
+        try {
+            await asyncTimeout(1000); // give some time to the page to load
+            await downloader.download();
+            console.log('Update download completed successfully');
+
+            const filePath = path.join(app.getPath('downloads'), "_deltamod_update_" + args[0].version + ".exe");
+            shell.openPath(filePath);
+            app.exit(0);
+        }
+        catch (error) {
+            console.error('Update download failed:', error);
+            dialog.showErrorBox('Update Download Failed', 'An error occurred while downloading the Deltamod update. Please try again later.');
+            ignoreUpdate = true;
+            win.webContents.send('page', 'main');
+            win.webContents.send('audio', true);
+        }
+    });
+
+    ipcMain.handle('ignore-update', async (event, args) => {
+        ignoreUpdate = true;
+        BrowserWindow.fromWebContents(event.sender).webContents.send('page', 'main');
+    });
     // A collection of IPC handlers for handling of sysindexes.
     ipcMain.handle('getSystemIndex', async (event, args) => {
         var partOverride = getSystemFile('_sysindex',true);
@@ -650,39 +743,45 @@ function createWindow() {
      * Returns the list of mods from the KVS.
     */
     ipcMain.handle('getModList', async (event, args) => {
-        var modlist = Modstore.modList();
-
+        var { modList, errors } = Modstore.modList();
         var edition = KeyValue.readKVS('deltaruneEdition');
 
-        return modlist.filter((mod) => {
+        const datalist = modList.filter((mod) => {
             var editionCompatible = (mod.demo && edition === 'demo') || (!mod.demo && edition === 'full');
+            if (!editionCompatible) return false; // return early if the first check fails, no need to check the file hashes at that point
+
             var hashCompatible = true;
 
             try {
-                if (mod.neededFiles > 0) {
-                    mod.neededFiles.forEach((file) => {
+                if (mod.neededFiles > 0)
+                    for (const file of mod.neededFiles) {
                         var specifiedHash = file.checksum.toLowerCase();
                         var filePath = path.join(KeyValue.readKVS('deltarunePath'), file.file);
 
-                        if (!fs.existsSync(filePath)) {
+                        if (!fs.existsSync(filePath) || hashFile(filePath).toLowerCase() !== specifiedHash) {
                             hashCompatible = false;
+                            break; // further checking is not needed, as at least one file is invalid anyway
                         }
-
-                        if (file.checksum) {
-                            if (hashFile(filePath).toLowerCase() !== specifiedHash) {
-                                hashCompatible = false;
-                            }
-                        }
-                    });
-                }
+                    };
             }
             catch (e) {
                 console.error('Error checking mod hashes compatibility:', e);
-                hashCompatible = true;
+                hashCompatible = false;
             }
 
             return hashCompatible && editionCompatible;
         });
+
+        return { modList: datalist, errors };
+    });
+
+    /*
+     * getModListFull
+     * Returns the list of mods from the KVS.
+     * Includes incompatible mods as well.
+    */
+    ipcMain.handle('getModListFull', async (event, args) => {
+        return Modstore.modList();
     });
 
     /*
@@ -702,7 +801,7 @@ function createWindow() {
             GamePatching.restoreOriginalsIfAny(pathname);
 
             // Patch the REAL install in-place (GamePatching backs up to *.original)
-            var log = await GamePatching.startGamePatch(pathname, getPacketDatabase(), args[0]);
+            var log = await GamePatching.startGamePatch(pathname, getPacketDatabase(), args[0], BrowserWindow.fromWebContents(event.sender));
 
             if (!log.patched) {
                 dialog.showErrorBox('Patching failed', 'Please check the log and try again.\n\n' + log.log);
@@ -856,6 +955,24 @@ function createWindow() {
     });
 
     /*
+     * fireUpdate
+     * Called by window when ready to get update info.
+    */
+    ipcMain.handle('fireUpdate', async (event) => {
+        Updates.checkUpdates().then((updateInfo) => {
+            console.log('Update check result:', updateInfo.update);
+            if (updateInfo.update && !ignoreUpdate) {
+                win.webContents.send('updateAvailable', updateInfo);
+                return;
+            }
+            else {
+                // nothing
+                return;
+            }
+        });
+    });
+
+    /*
      * importDelta
      * Imports the Deltarune install into the app data.
      * args[0] is the path to the Deltarune install.
@@ -889,19 +1006,13 @@ function createWindow() {
         try {
             copyRecursiveSync(path1, path2);
 
-            dialog.showMessageBox(win, {
-                type: 'info',
-                title: 'Import Successful',
-                message: 'Deltarune install imported successfully.',
-                buttons: ['OK']
-            }).then(() => {
-                KeyValue.setKVS('loadedDeltarune', true);
-                KeyValue.setKVS('deltarunePath', path2);
-                KeyValue.setKVS('deltaruneEdition', gameEdition);
-                KeyValue.kvsFlush();
-                app.relaunch();
-                app.exit();
-            });
+            KeyValue.setKVS('loadedDeltarune', true);
+            KeyValue.setKVS('deltarunePath', path2);
+            KeyValue.setKVS('deltaruneEdition', gameEdition);
+            KeyValue.setKVS('enabledMods', []);
+            KeyValue.kvsFlush();
+            
+            page("main");
             return true;
         } catch (err) {
             dialog.showErrorBox('Import failed', `Failed to import Deltarune install: ${err.message}`);
@@ -909,9 +1020,27 @@ function createWindow() {
             return false;
         }
     });
+
+    setWindow(win);
 }
 
+if (!app.requestSingleInstanceLock()) app.quit();
+else app.on('second-instance', (e, argv) => {
+    console.log("Received second-instance check:", argv);
+    const maybeUrl = argv.find(arg => arg.startsWith('deltamod://'));
+    if (maybeUrl)
+        setSharedVar('gb1click', true);
+        handleProtocolLaunch(maybeUrl);
+});
+
 app.whenReady().then(() => {
+    if (process.platform === 'win32' || process.platform === 'linux') {
+        const maybeUrl = process.argv.find(arg => arg.startsWith('deltamod://'));
+        if (maybeUrl)
+            setSharedVar('gb1click', true);
+            handleProtocolLaunch(maybeUrl);
+    }
+
     // Run a safety restore before creating the window (handles crash-last-time cases)
     try {
         const p = KeyValue.readKVS('deltarunePath');
@@ -928,8 +1057,6 @@ app.whenReady().then(() => {
     createWindow();       // the main window
 });
 
-
-
 app.on('window-all-closed', () => {
     if (process.platform !== 'darwin') app.quit();
 });
@@ -937,3 +1064,5 @@ app.on('window-all-closed', () => {
 app.on('activate', () => {
     if (BrowserWindow.getAllWindows().length === 0) createWindow();
 });
+
+module.exports = {loadUrl};

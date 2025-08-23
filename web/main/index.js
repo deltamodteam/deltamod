@@ -1,41 +1,142 @@
-function createMod(modName, modDescription, modUID) {
-    const tr = document.createElement('tr');
+function purifyDescription(desc) {
+    var final = desc;
+    final = desc.replace(/\n/g, ' ').substring(0, 100);
+    if (desc.length > 100) final += '...';
+    return final;
+}
 
-    /*
-    const td0 = document.createElement('td');
-    td0.className = 'ord';
-    td0.id = modUID;
-    td0.innerHTML = priority;
-    */
+async function createMod(mod) {
+    const modRow = document.createElement('tr');
 
-    const td1 = document.createElement('td');
+    // Column 1 (Mod)
+    const modNameContainer = document.createElement('td');
+    
+    const bigAhhContainer = document.createElement('div');
+    bigAhhContainer.style.display = 'flex';
+    bigAhhContainer.style.alignItems = 'center';
+    bigAhhContainer.style.gap = '10px';
+    bigAhhContainer.style.justifyContent = 'left';
+
+    let IMAGE_DIMENSION = 32;
+    const imageContainer = document.createElement('div');
+    imageContainer.style.width = IMAGE_DIMENSION + 'px';
+    imageContainer.style.height = IMAGE_DIMENSION + 'px';
+    
+    let imeta = await window.electronAPI.invoke('getModImage', [mod.uid]);
+    if (!imeta.path) {
+        imeta.path = 'deltapack://web/mod-placeholder.png';
+    }
+
+    const img = document.createElement('img');
+    img.src = (imeta.path.includes('deltapack') ? '' : "packet://") + imeta.path;
+    img.style.width = IMAGE_DIMENSION + 'px';
+    img.style.height = IMAGE_DIMENSION + 'px';
+    img.style.objectFit = 'contain';
+    imageContainer.appendChild(img);
+
+    const infoContainer = document.createElement('div');
     const titleSpan = document.createElement('span');
-    titleSpan.innerHTML = `<b>${modName}</b>`;
-    titleSpan.id = `modtitle-${modUID}`;
-    td1.appendChild(titleSpan);
-
-    td1.appendChild(document.createElement('br'));
+    titleSpan.innerText = mod.name;
+    titleSpan.id = `modtitle-${mod.uid}`;
+    infoContainer.appendChild(titleSpan);
+    infoContainer.appendChild(document.createElement('br'));
 
     const descSpan = document.createElement('span');
     descSpan.className = 'calibri';
-    descSpan.innerHTML = modDescription;
-    descSpan.id = `moddesc-${modUID}`;
-    td1.appendChild(descSpan);
+    descSpan.innerText = purifyDescription(mod.description);
+    descSpan.id = `moddesc-${mod.uid}`;
+    infoContainer.appendChild(descSpan);
 
-    const td2 = document.createElement('td');
-    td2.className = 'checkmod';
-    const checkbox = document.createElement('input');
-    checkbox.type = 'checkbox';
-    checkbox.id = `modcheck-${modUID}`;
-    checkbox.checked = true;
-    td2.appendChild(checkbox);
+    const authorSpan = document.createElement('span');
+    authorSpan.className = 'calibri';
+    authorSpan.style.fontSize = 'smaller';
+    authorSpan.style.color = '#888';
+    authorSpan.innerText = `Authors: ${mod.author.join(', ')}`;
+    authorSpan.id = `modauthor-${mod.uid}`;
+    infoContainer.appendChild(document.createElement('br'));
+    infoContainer.appendChild(authorSpan);
 
-    tr.appendChild(td1);
-    tr.appendChild(td2);
+    bigAhhContainer.appendChild(imageContainer);
+    bigAhhContainer.appendChild(infoContainer);
 
-    document.getElementById('modlist').appendChild(tr);
+    modNameContainer.appendChild(bigAhhContainer);
 
-    return tr;
+    // Column 2 (Actions)
+    const actionContainer = document.createElement('td');
+    actionContainer.className = 'modlist-actions-column';
+    {
+        const enabled = document.createElement("input");
+        enabled.type = 'checkbox';
+        enabled.id = `modcheck-${mod.uid}`;
+        enabled.checked = await window.electronAPI.invoke('getModState', [mod.uid]);
+        enabled.onchange = e => {
+            const c = e.target;
+            const isEnabled = c.checked;
+            const forMod = mod.uid;
+
+            window.electronAPI.invoke("toggleModState", [forMod, isEnabled]);
+        };
+        actionContainer.appendChild(enabled);
+
+        const exploreModButton = document.createElement('button');
+        exploreModButton.onclick = () => window.electronAPI.invoke('openModFolder', [mod.folder]);
+        exploreModButton.innerText = "🔎";
+        actionContainer.appendChild(exploreModButton);
+
+        const deleteModButton = document.createElement('button');
+        deleteModButton.onclick = () => window.electronAPI.invoke('removeMod', [mod.folder]);
+        deleteModButton.innerText = "🗑️";
+        actionContainer.appendChild(deleteModButton);
+    }
+
+    modRow.appendChild(modNameContainer);
+    modRow.appendChild(actionContainer);
+
+    document.getElementById('modlist').appendChild(modRow);
+    return modRow;
+}
+
+function createErroringMods(errors) {
+    const dialogElement = document.getElementById("error-list-dialog");
+    const errorList = document.getElementById("error-list-div");
+
+    for (const child of errorList.children) errorList.removeChild(child);
+
+    for (const err of errors) {
+        // err { mod: string, reason: string }
+        const element = document.createElement("div");
+        element.className = "error-holder";
+
+        const modId = document.createElement("span");
+        modId.innerHTML = `Mod ID '${err.mod}'`;
+
+        const reasoning = document.createElement("span");
+        reasoning.className = 'calibri';
+        reasoning.innerHTML = `<b style='font-weight: bold !important;'>Reason:</b> ${err.reason}`;
+
+        const actionRow = document.createElement("div");
+        actionRow.className = "error-buttons";
+        {
+            // Action Row
+            const exploreBtn = document.createElement("button");
+            exploreBtn.innerText = "Open Folder";
+            exploreBtn.onclick = () => window.electronAPI.invoke("openModFolder", [err.mod]);
+            actionRow.appendChild(exploreBtn);
+
+            const deleteBtn = document.createElement("button");
+            deleteBtn.innerText = "Delete Permanently";
+            deleteBtn.onclick = () => window.electronAPI.invoke("removeMod", [err.mod]);
+            actionRow.appendChild(deleteBtn);
+        }
+
+        element.appendChild(modId);
+        element.appendChild(document.createElement("br"));
+        element.appendChild(reasoning);
+        element.appendChild(actionRow);
+        errorList.appendChild(element);
+    }
+
+    dialogElement.showModal();
 }
 
 function loadInst(index) {
@@ -43,22 +144,27 @@ function loadInst(index) {
 }
 
 (async () => {
-    var modList = await window.electronAPI.invoke('getModList', []);
+    const errorBanner = document.getElementById("error-banner");
 
-    modList.forEach((mod, index) => {
-        createMod(mod.name, mod.description, mod.uid);
-    });
+    var { modList, errors } = await window.electronAPI.invoke('getModList', []);
+    modList.forEach(x => createMod(x));
+
+    if (errors.length > 0) {
+        errorBanner.onclick = () => createErroringMods(errors);
+        errorBanner.children[0].innerText = `${errors.length} mod${errors.length === 1 ? "" : "s"} failed to load`;
+        errorBanner.style.display = "inherit";
+    } else errorBanner.style.display = "none";
 
     if (modList.length === 0) {
         const tr = document.createElement('tr');
         const td = document.createElement('td');
         td.colSpan = 2;
-        td.innerHTML = 'No compatible mods found.';
+        td.innerText = 'No compatible mods found.';
         td.style.textAlign = 'center';
         tr.appendChild(td);
         document.getElementById('modlist').appendChild(tr);
 
-        document.getElementById('par').innerHTML = 'Run without patches';
+        document.getElementById('par').innerText = 'Run without patches';
     }
 
     var sysindex = await window.electronAPI.invoke('getSystemIndex', []);
@@ -75,7 +181,7 @@ function loadInst(index) {
             option.selected = true;
         }
         var edition = await window.electronAPI.invoke('getEditionByIndex', [i]);
-        option.innerHTML = `Install ${i + 1} (${edition})`;
+        option.innerText = `Install ${i + 1} (${edition})`;
         document.getElementById('installs').appendChild(option);
     }
     var newOption = document.createElement('option');
@@ -97,3 +203,21 @@ function patchAndRun() {
 }
 
 window.currentPageStack.patchAndRun = patchAndRun;
+
+window.currentPageStack.disableMusic = async function(button) {
+    audio.pause();
+    audio.currentTime = 0;
+    button.style.display = 'none';
+    button.disabled = true;
+    await window.electronAPI.invoke('setUniqueFlag', ["AUDIO", false]);
+};
+
+(async () => {
+    var audioEnabled = await window.electronAPI.invoke('getUniqueFlag', ["AUDIO"]);
+    if (audioEnabled) {
+        document.getElementById('audioBtn').style.display = 'block';
+    }
+    else {
+        document.getElementById('audioBtn').style.display = 'none';
+    }
+})();

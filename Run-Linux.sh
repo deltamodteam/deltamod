@@ -10,9 +10,9 @@ goto() {
   exit
 }
 
-prompt_for_input() {
+prompt_for_install() {
     while true; do
-        echo -n "Do you want to install or update dependencies (note this will only work on Ubuntu-based systems)? (y/n): "
+        echo -n "Do you want to install or update dependencies? (y/n): "
         read -r response
         case "$response" in
             [Yy]* )
@@ -36,9 +36,48 @@ prompt_for_input() {
     done
 }
 
-prompt_for_input	
+prompt_for_distro() {
+    while true; do
+        echo -n "What base does your distro use? ('U'buntu (includes Mint, PopOS, Linux Lite, and ChromeOS), 'M'acOS, 'A'rch (includes SteamOS), 'R'ed Hat, or 'C'ancel): "
+        read -r response
+        case "$response" in
+            [Uu]* )
+                echo "You selected Ubuntu-based (includes Mint, PopOS, Linux Lite, and ChromeOS)."
+				goto installUbuntu
+                return 0
+                ;;
+            [Mm]* )
+                echo "You selected MacOS."
+				goto installMac
+                return 1
+                ;;
+            [Rr]*)
+                echo "You selected Red Hat"
+                goto installRedHat
+                return 2
+                ;;
+            [Aa]* )
+                echo "You selected Arch-based (includes SteamOS)"
+                goto installArch
+                return 3
+                ;;
+            [Cc]* )
+                echo "You selected Cancel."
+                break
+                ;;
+            * )
+                echo "Invalid input or distro not supported."
+                ;;
+        esac
+    done
+}
+
+prompt_for_install	
 
 #install:#
+prompt_for_distro
+
+#installUbuntu:#
 		#Intall .NET SDK 8.0
 
 		sudo snap install 'dotnet-sdk' --classic
@@ -65,11 +104,11 @@ prompt_for_input
 
 		#Install GM3P
 
-		wget https://github.com/techy804/MassModPatcher/releases/download/v0.6.0-alpha1/GM3P.v0.6.0-alpha1.zip
+		wget https://github.com/techy804/MassModPatcher/releases/download/v0.6.0-alpha2/GM3P.v0.6.0-alpha2.zip
 
-		unzip -f -o "./GM3P.v0.6.0-alpha1.zip" -d "./gm3p"
+		unzip -f -o "./GM3P.v0.6.0-alpha2.zip" -d "./gm3p"
 
-		rm './GM3P.v0.6.0-alpha1.zip'
+		rm './GM3P.v0.6.0-alpha2.zip'
 
 		#Install needed npm packages and run
 
